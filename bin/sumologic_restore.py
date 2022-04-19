@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Exaplanation: Sumo Logic Backup! An easy way to get things backed up!
+Exaplanation: Sumo Logic Restore! Recovering content from a Sumo Logic backup
 
 Usage:
    $ python  sumologic_restore  [ options ]
@@ -31,7 +31,7 @@ import datetime
 import argparse
 import configparser
 import http
-import zipfile
+import pandas
 import requests
 
 sys.dont_write_bytecode = 1
@@ -65,9 +65,13 @@ ARGS = PARSER.parse_args()
 
 DELAY_TIME = .5
 
-CONTENTMAP = dict()
+RESTOREMAP = dict()
 
-REPORTTAG = 'sumologic-backup'
+RESTORERECORD = dict()
+
+REPORTTAG = 'sumologic-restore'
+
+RESTORELOGDIR = '/var/tmp'
 
 RIGHTNOW = datetime.datetime.now()
 
@@ -79,9 +83,6 @@ def resolve_option_variables():
     """
     Validates and confirms all necessary variables for the script
     """
-
-    if ARGS.verbose > 6:
-        print('Validating: {}'.format('supplied variables'))
 
     if ARGS.MY_SECRET:
         (keyname, keysecret) = ARGS.MY_SECRET.split(':')
@@ -98,9 +99,6 @@ def resolve_config_variables():
     Validates and confirms all necessary variables for the script
     """
 
-    if ARGS.verbose > 6:
-        print('Validating: {}'.format('configuration file variables'))
-
     if ARGS.CONFIG:
         cfgfile = os.path.abspath(ARGS.CONFIG)
         configobj = configparser.ConfigParser()
@@ -108,6 +106,7 @@ def resolve_config_variables():
         configobj.read(cfgfile)
 
         if ARGS.verbose > 8:
+            print('Displaying Config Contents:')
             print(dict(configobj.items('Default')))
 
         if configobj.has_option("Default", "SUMO_TAG"):
@@ -148,19 +147,102 @@ def initialize_variables():
 
 ( sumo_uid, sumo_key ) = initialize_variables()
 
-def create_backup_directory():
+def create_restore_point(source):
     """
-    Create a backup directory for all of the content retrieved
+    Create a restore folder for all of the content restored
     """
 
-    time_tag = '.'.join((DATESTAMP, TIMESTAMP))
-    backupdir = os.path.abspath(os.path.join(ARGS.OUTPUTDIR, time_tag, 'content'))
-    os.makedirs(backupdir, exist_ok = True)
+    restore_folder = '.'.join((REPORTTAG, DATESTAMP, TIMESTAMP))
+    personal_folder_id = source.get_myfolders()['id']
+    restore_folder_id = source.make_folder(restore_folder, personal_folder_id)['id']
 
-    reportdir = os.path.abspath(os.path.join(ARGS.OUTPUTDIR, time_tag, 'manifest'))
-    os.makedirs(reportdir, exist_ok = True)
+    return restore_folder_id
 
-    return backupdir, reportdir
+def read_backup_manifest(backups):
+    """
+    Read the backup manifest to determine restore targets
+    """
+
+    manifestfile = '{}/manifest/sumologic-backup.csv'.format(backups)
+
+    dataframe = pandas.read_csv(manifestfile, header=0)
+
+    return dataframe
+
+def create_restore_folders(source, restoredf, restoreid):
+    """
+    Create all of the intermediary folders to restore content
+    """
+
+    folderdataframe = restoredf.loc[restoredf['my_type'] == 'Folder']
+
+    bpathframe = folderdataframe[['backup_path']]
+
+    bplist = bpathframe.values.tolist()
+
+    for bpelement in bplist:
+        counter = 0
+        createdid = restoreid
+        pathlist = list()
+        for bpid in bpelement[0].split('/'):
+            dirnamedf = restoredf.loc[restoredf['uid_myself'] == bpid]
+            foldername = dirnamedf['my_name'].values.tolist()[0]
+            foldername = str(foldername)
+            foldername = foldername.replace("/","")
+            if counter == 0:
+                parentid = restoreid
+                restorepath = foldername
+                pathlist.append(foldername)
+            else:
+                restorepath = '/'.join(pathlist)
+                parentid = RESTOREMAP[restorepath]
+                pathlist.append(foldername)
+                restorepath = '/'.join(pathlist)
+            if restorepath not in RESTOREMAP:
+                createdid = source.make_folder(foldername, parentid)['id']
+                if ARGS.verbose > 6:
+                    print('Created Restore-Point: {}'.format(restorepath))
+                RESTOREMAP[restorepath] = createdid
+            counter = counter + 1
+
+def restore_content(source, backupdf):
+    """
+    Run through the manifest again to restore content to the right folders
+    """
+
+    folderdataframe = backupdf.loc[backupdf['my_type'] != 'Folder']
+
+    bpathframe = folderdataframe[['my_path']]
+
+    bplist = bpathframe.values.tolist()
+
+    for bpelement in bplist:
+        manifestpath = bpelement[0]
+        backuppartdf = backupdf.loc[backupdf['my_path'] == manifestpath ]
+        backuppartchunk = backuppartdf[['backup_path']].values.tolist()[0][0]
+        sourcefile = '{}/content/{}.json'.format(ARGS.BACKUPDIR,backuppartchunk)
+        contentdir = os.path.dirname(manifestpath.lstrip("/"))
+        parentid = RESTOREMAP[contentdir]
+        if ARGS.verbose > 6:
+            print('Destination: {} Source: {}'.format(parentid, sourcefile))
+            load_restore_content(source, parentid, sourcefile)
+
+def load_restore_content(source, parentid, sourcefile):
+    """
+    Load the identified content into Sumo Logic
+    """
+    with open(sourcefile, "r") as sourceobject:
+        jsonpayload = json.load(sourceobject)
+        result = source.start_import_job(parentid, jsonpayload)
+        jobid = result['id']
+        status = source.check_import_job_status(parentid, jobid)
+        if ARGS.verbose > 8:
+            print('STATUS: {}'.format(status['status']))
+        while status['status'] == 'InProgress':
+            status = source.check_import_job_status(parentid, jobid)
+            if ARGS.verbose > 8:
+                print('STATUS: {}'.format(status['status']))
+            time.sleep(DELAY_TIME)
 
 def build_details(source, parent_name, parent_oid_path, child):
     """
@@ -173,6 +255,9 @@ def build_details(source, parent_name, parent_oid_path, child):
 
     my_name = child['name']
 
+    if ARGS.verbose > 6:
+        print('Cataloging Restored Content: {}'.format(my_name))
+
     my_path_list = ( parent_name, my_name )
     my_path_name = '/'.join(my_path_list)
 
@@ -184,112 +269,63 @@ def build_details(source, parent_name, parent_oid_path, child):
         for content_child in content_list['children']:
             build_details(source, my_path_name, my_oid_path, content_child)
 
-    CONTENTMAP[uid_myself] = dict()
-    CONTENTMAP[uid_myself]["parent"] = uid_parent
-    CONTENTMAP[uid_myself]["myself"] = uid_myself
-    CONTENTMAP[uid_myself]["name"] = my_name
-    CONTENTMAP[uid_myself]["path"] = my_path_name
-    CONTENTMAP[uid_myself]["backupname"] = uid_myself
-    CONTENTMAP[uid_myself]["backuppath"] = my_oid_path
-    CONTENTMAP[uid_myself]["type"] = my_type
+    RESTORERECORD[uid_myself] = dict()
+    RESTORERECORD[uid_myself]["parent"] = uid_parent
+    RESTORERECORD[uid_myself]["myself"] = uid_myself
+    RESTORERECORD[uid_myself]["name"] = my_name
+    RESTORERECORD[uid_myself]["path"] = my_path_name
+    RESTORERECORD[uid_myself]["backupname"] = uid_myself
+    RESTORERECORD[uid_myself]["backuppath"] = my_oid_path
+    RESTORERECORD[uid_myself]["type"] = my_type
 
-def create_manifest(manifestdir):
+def create_restore_manifest_file():
     """
-    Now display the output we want from the CONTENTMAP data structure we made.
+    Now display the output we want from the RESTORERECORD data structure we made.
     """
-    manifestname = '{}.csv'.format(REPORTTAG)
-    manifestfile = os.path.join(manifestdir, manifestname)
+    manifestname = '{}.{}.{}.csv'.format(REPORTTAG, DATESTAMP, TIMESTAMP)
+    manifestfile = os.path.join(RESTORELOGDIR, manifestname)
+
+    if ARGS.verbose > 6:
+        print('Creating Restore-Manifest: {}'.format(manifestfile))
 
     with open(manifestfile, 'a') as manifestobject:
         manifestobject.write('{},{},{},{},{},{},{}\n'.format("uid_myself", "uid_parent", \
                              "my_type", "my_name", "my_path", "backup_oid", "backup_path"))
 
-        for content_item in CONTENTMAP:
-            uid_parent = CONTENTMAP[content_item]["parent"]
-            uid_myself = CONTENTMAP[content_item]["myself"]
-            my_name = CONTENTMAP[content_item]["name"]
-            my_path = CONTENTMAP[content_item]["path"]
-            my_type = CONTENTMAP[content_item]["type"]
-            my_backupname = CONTENTMAP[content_item]["backupname"]
-            my_backuppath = CONTENTMAP[content_item]["backuppath"]
+        for content_item in RESTORERECORD:
+            uid_parent = RESTORERECORD[content_item]["parent"]
+            uid_myself = RESTORERECORD[content_item]["myself"]
+            my_name = RESTORERECORD[content_item]["name"]
+            my_path = RESTORERECORD[content_item]["path"]
+            my_type = RESTORERECORD[content_item]["type"]
+            my_backupname = RESTORERECORD[content_item]["backupname"]
+            my_backuppath = RESTORERECORD[content_item]["backuppath"]
 
-            manifestobject.write('{},{},{},{},{},{},{}\n'.format(uid_myself, uid_parent, \
+            manifestobject.write('{},{},{},\"{}\",\"{}\",{},{}\n'.format(uid_myself, uid_parent, \
                                  my_type, my_name, my_path, my_backupname, my_backuppath))
 
-def create_content_map(source):
+def create_restore_manifest(source,restoreid):
     """
-    This will collect the information on object for sumologic and then collect that into a list.
-    the output of the action will provide a tuple of the orgid, objecttype, and id
+    Create a manifest of the materials restored
     """
 
-    if ARGS.BACKUPTARGET == 'Personal':
-        content_list = source.get_myfolders()
-        parent_base_path = content_list['id']
-        parent_name = "/" + content_list['name']
-    else:
-        content_list = source.get_globalfolders()
-        parent_base_path = content_list['id']
-        parent_name = "/" + 'Global'
+    content_list = source.get_myfolder(restoreid)
+    parent_base_path = content_list['id']
+    uid_myself = content_list['id']
+    uid_parent = content_list['parentId']
+    parent_name = "/" + content_list['name']
+
+    RESTORERECORD[uid_myself] = dict()
+    RESTORERECORD[uid_myself]["parent"] = uid_parent
+    RESTORERECORD[uid_myself]["myself"] = uid_myself
+    RESTORERECORD[uid_myself]["name"] = parent_name
+    RESTORERECORD[uid_myself]["path"] = "/" + parent_name
+    RESTORERECORD[uid_myself]["backupname"] = parent_name
+    RESTORERECORD[uid_myself]["backuppath"] = parent_base_path
+    RESTORERECORD[uid_myself]["type"] = 'Folder'
 
     for child in content_list['children']:
         build_details(source, parent_name, parent_base_path, child)
-
-    return CONTENTMAP
-
-def create_backup_folders(backups):
-    """
-    This creates the intermediary directories so we can archive content an element at a time
-    """
-
-    for content_item in CONTENTMAP:
-        backup_type = CONTENTMAP[content_item]["type"]
-        backup_path = CONTENTMAP[content_item]["backuppath"]
-        if backup_type == 'Folder':
-            backup_target_dir = os.path.join(backups, backup_path)
-            os.makedirs(backup_target_dir, exist_ok = True)
-
-def backup_content(source,backupdir):
-    """
-    Runs through CONTENTMAP again this time exporting the content into an appropriate location
-    """
-
-    for content_item in CONTENTMAP:
-
-        backup_type = CONTENTMAP[content_item]["type"]
-        contentid = CONTENTMAP[content_item]["myself"]
-
-        backuptarget = os.path.join(backupdir, CONTENTMAP[contentid]['backuppath']) + '.json'
-
-        if backup_type != 'Folder':
-            exportjob = source.start_export_job(contentid)['id']
-            exportstatus = source.check_export_job_status(contentid,exportjob)['status']
-            while exportstatus != 'Success':
-                exportstatus = source.check_export_job_status(contentid,exportjob)['status']
-
-            exportresult = source.check_export_job_result(contentid,exportjob)
-        else:
-            exportresult = source.get_myfolder(contentid)
-
-        if ARGS.verbose > 4:
-            print('Exporting: {} - {}'.format(contentid, backuptarget))
-
-        with open (backuptarget, "w") as backupobject:
-            backupobject.write(json.dumps(exportresult) + '\n')
-
-def create_zipfile(backupdir):
-    """
-    Create the zipfile from the backup directory
-    """
-    targetzipfile = '{}/{}.{}.{}.zip'.format(backupdir, REPORTTAG, DATESTAMP, TIMESTAMP )
-
-    if ARGS.verbose > 4:
-        print('Creating: zipfile {}'.format(targetzipfile))
-
-    with zipfile.ZipFile(targetzipfile, 'w') as zipobject:
-        for foldername, _subfolders, filenames in os.walk(backupdir):
-            for filename in filenames:
-                filepath = os.path.join(foldername, filename)
-                zipobject.write(filepath, os.path.basename(filepath))
 
 def main():
     """
@@ -298,34 +334,35 @@ def main():
     """
 
     if ARGS.verbose > 3:
-        print("step{}: - Authenticating".format('1'))
+        print("Step-01: - Authenticating")
 
     source = SumoApiClient(sumo_uid, sumo_key)
 
     if ARGS.verbose > 3:
-        print("step{}: - Creating Restore Point Folder".format('2'))
+        print("Step-02: - Creating Restore Point Folder")
 
-    ### (backups, reports ) = create_backup_directory()
-
-    if ARGS.verbose > 3:
-        print("step{}: - Reading Manifest".format('3'))
-
-    ### _content_manifest = create_content_map(source)
+    restoreid = create_restore_point(source)
 
     if ARGS.verbose > 3:
-        print("step{}: - Creating Intermediate Backup Folders".format('4'))
+        print("Step-03: - Reading Manifest")
 
-    ### create_manifest(reports)
-
-    if ARGS.verbose > 3:
-        print("step{}: - Restoring content as OID".format('5'))
-
-    ### create_backup_folders(backups)
+    manifestdf = read_backup_manifest(ARGS.BACKUPDIR)
 
     if ARGS.verbose > 3:
-        print("step{}: - Renaming OID to previous file names".format('6'))
+        print("Step-04: - Creating Intermediate Backup Folders")
 
-    ### backup_content(source, backups)
+    create_restore_folders(source,manifestdf,restoreid)
+
+    if ARGS.verbose > 3:
+        print("Step-05: - Restoring Content to Backup Folders")
+
+    restore_content(source,manifestdf)
+
+    if ARGS.verbose > 3:
+        print("Step-06: - Write Out Restored Content Manifest")
+
+    create_restore_manifest(source,restoreid)
+    create_restore_manifest_file()
 
 ### class ###
 
@@ -414,7 +451,7 @@ class SumoApiClient():
 
     def get_myfolders(self):
         """
-        Using an HTTP client, this uses a GET to retrieve all connection information.
+        This uses a GET to retrieve all connection information.
         """
         url = "/v2/content/folders/personal/"
         body = self.get(url).text
@@ -423,7 +460,7 @@ class SumoApiClient():
 
     def get_myfolder(self, myself):
         """
-        Using an HTTP client, this uses a GET to retrieve single connection information.
+        This uses a GET to retrieve single connection information.
         """
         url = "/v2/content/folders/" + str(myself)
         body = self.get(url).text
@@ -431,9 +468,25 @@ class SumoApiClient():
         time.sleep(DELAY_TIME)
         return results
 
+    def make_folder(self, myname, myparent):
+        """
+        Create a folder
+        """
+
+        folderpayload = dict()
+        folderpayload['name'] = str(myname)
+        folderpayload['description'] = str(myname)
+        folderpayload['parentId'] = str(myparent)
+
+        url = "/v2/content/folders"
+        body = self.post(url,data=folderpayload).text
+        results = json.loads(body)
+        time.sleep(DELAY_TIME)
+        return results
+
     def get_globalfolders(self):
         """
-        Using an HTTP client, this uses a GET to retrieve all connection information.
+        This uses a GET to retrieve all connection information.
         """
         url = "/v2/content/folders/global"
         body = self.get(url).text
@@ -442,7 +495,7 @@ class SumoApiClient():
 
     def get_globalfolder(self, myself):
         """
-        Using an HTTP client, this uses a GET to retrieve single connection information.
+        This uses a GET to retrieve single connection information.
         """
         url = "/v2/content/folders/global/" + str(myself)
         body = self.get(url).text
@@ -451,7 +504,7 @@ class SumoApiClient():
 
     def start_export_job(self, myself):
         """
-        Using an HTTP client, this starts an export job by passing in the content ID
+        This starts an export job by passing in the content ID
         """
         url = "/v2/content/" + str(myself) + "/export"
         body = self.post(url, data=str(myself)).text
@@ -460,7 +513,7 @@ class SumoApiClient():
 
     def check_export_job_status(self, myself,jobid):
         """
-        Using an HTTP client, this starts an export job by passing in the content ID
+        This starts an export job by passing in the content ID
         """
         url = "/v2/content/" + str(myself) + "/export/" + str(jobid) + "/status"
         time.sleep(DELAY_TIME)
@@ -470,11 +523,34 @@ class SumoApiClient():
 
     def check_export_job_result(self, myself,jobid):
         """
-        Using an HTTP client, this starts an export job by passing in the content ID
+        This starts an export job by passing in the content ID
         """
         url = "/v2/content/" + str(myself) + "/export/" + str(jobid) + "/result"
         time.sleep(DELAY_TIME)
         body = self.get(url).text
+        results = json.loads(body)
+        return results
+
+    def start_import_job(self, folderid, content, adminmode=False, overwrite=False):
+        """
+        This starts an import job by passing in the content ID and content
+        """
+        headers = {'isAdminMode': str(adminmode).lower()}
+        params = {'overwrite': str(overwrite).lower()}
+        url = "/v2/content/folders/" + str(folderid) + "/import"
+        time.sleep(DELAY_TIME)
+        body = self.post(url, content, headers=headers, params=params).text
+        results = json.loads(body)
+        return results
+
+    def check_import_job_status(self, folderid, jobid, adminmode=False):
+        """
+        This checks on the status of an import content job
+        """
+        headers = {'isAdminMode': str(adminmode).lower()}
+        url = "/v2/content/folders/" + str(folderid) + "/import/" + str(jobid) + "/status"
+        time.sleep(DELAY_TIME)
+        body = self.get(url, headers=headers).text
         results = json.loads(body)
         return results
 

@@ -62,13 +62,14 @@ Scripts and Functions:
 
        provide increasingly verbose output on the script execution
 
-    5. ./bin/sumologic_restore.py -t <backup_directory>
+    5. ./bin/sumologic_restore.py -b <backup_directory>
 
        a path to an existing backup
 
     6. ./bin/sumologic_restore.py -r <restore_point>
 
        a restore directory for the imported content
+
 
 Uncoming Features:
 ==================

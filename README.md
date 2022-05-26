@@ -7,6 +7,22 @@ And of course, if you can backup as a code repository, why not be able to restor
 
 Sumo Logic restore does just that, able to restore either a full or partial backup.
 
+Business Case
+=============
+
+Curious what was the business goals we wanted to solve?
+
+Please read on in our [writeup](doc/writeup.md)!
+
+Examples
+========
+
+![example1](doc/swaggertools1.png)
+
+![example2](doc/swaggertools2.png)
+
+![example3](doc/swaggertools3.png)
+
 Installing the Scripts
 =======================
 

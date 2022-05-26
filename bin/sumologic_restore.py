@@ -65,9 +65,9 @@ ARGS = PARSER.parse_args()
 
 DELAY_TIME = .5
 
-RESTOREMAP = dict()
+RESTOREMAP = {}
 
-RESTORERECORD = dict()
+RESTORERECORD = {}
 
 REPORTTAG = 'sumologic-restore'
 
@@ -141,7 +141,7 @@ def initialize_variables():
         my_key = os.environ['SUMO_KEY']
 
     except KeyError as myerror:
-        print('Environment Variable Not Set :: {} '.format(myerror.args[0]))
+        print(f'Environment Variable Not Set :: {myerror.args[0]}')
 
     return my_uid, my_key
 
@@ -163,7 +163,7 @@ def read_backup_manifest(backups):
     Read the backup manifest to determine restore targets
     """
 
-    manifestfile = '{}/manifest/sumologic-backup.csv'.format(backups)
+    manifestfile = f'{backups}/manifest/sumologic-backup.csv'
 
     dataframe = pandas.read_csv(manifestfile, header=0)
 
@@ -183,7 +183,7 @@ def create_restore_folders(source, restoredf, restoreid):
     for bpelement in bplist:
         counter = 0
         createdid = restoreid
-        pathlist = list()
+        pathlist = []
         for bpid in bpelement[0].split('/'):
             dirnamedf = restoredf.loc[restoredf['uid_myself'] == bpid]
             foldername = dirnamedf['my_name'].values.tolist()[0]
@@ -201,7 +201,7 @@ def create_restore_folders(source, restoredf, restoreid):
             if restorepath not in RESTOREMAP:
                 createdid = source.make_folder(foldername, parentid)['id']
                 if ARGS.verbose > 6:
-                    print('Created Restore-Point: {}'.format(restorepath))
+                    print(f'Created Restore-Point: {restorepath}')
                 RESTOREMAP[restorepath] = createdid
             counter = counter + 1
 
@@ -220,28 +220,28 @@ def restore_content(source, backupdf):
         manifestpath = bpelement[0]
         backuppartdf = backupdf.loc[backupdf['my_path'] == manifestpath ]
         backuppartchunk = backuppartdf[['backup_path']].values.tolist()[0][0]
-        sourcefile = '{}/content/{}.json'.format(ARGS.BACKUPDIR,backuppartchunk)
+        sourcefile = f'{ARGS.BACKUPDIR}/content/{backuppartchunk}.json'
         contentdir = os.path.dirname(manifestpath.lstrip("/"))
         parentid = RESTOREMAP[contentdir]
         if ARGS.verbose > 6:
-            print('Destination: {} Source: {}'.format(parentid, sourcefile))
+            print(f'Destination: {parentid} Source: {sourcefile}')
             load_restore_content(source, parentid, sourcefile)
 
 def load_restore_content(source, parentid, sourcefile):
     """
     Load the identified content into Sumo Logic
     """
-    with open(sourcefile, "r") as sourceobject:
+    with open(sourcefile, "r", encoding='utf8') as sourceobject:
         jsonpayload = json.load(sourceobject)
         result = source.start_import_job(parentid, jsonpayload)
         jobid = result['id']
         status = source.check_import_job_status(parentid, jobid)
         if ARGS.verbose > 8:
-            print('STATUS: {}'.format(status['status']))
+            print(f'STATUS: {status["status"]}')
         while status['status'] == 'InProgress':
             status = source.check_import_job_status(parentid, jobid)
             if ARGS.verbose > 8:
-                print('STATUS: {}'.format(status['status']))
+                print(f'STATUS: {status["status"]}')
             time.sleep(DELAY_TIME)
 
 def build_details(source, parent_name, parent_oid_path, child):
@@ -256,7 +256,7 @@ def build_details(source, parent_name, parent_oid_path, child):
     my_name = child['name']
 
     if ARGS.verbose > 6:
-        print('Cataloging Restored Content: {}'.format(my_name))
+        print(f'Cataloging Restored Content: {my_name}')
 
     my_path_list = ( parent_name, my_name )
     my_path_name = '/'.join(my_path_list)
@@ -269,7 +269,7 @@ def build_details(source, parent_name, parent_oid_path, child):
         for content_child in content_list['children']:
             build_details(source, my_path_name, my_oid_path, content_child)
 
-    RESTORERECORD[uid_myself] = dict()
+    RESTORERECORD[uid_myself] = {}
     RESTORERECORD[uid_myself]["parent"] = uid_parent
     RESTORERECORD[uid_myself]["myself"] = uid_myself
     RESTORERECORD[uid_myself]["name"] = my_name
@@ -282,15 +282,15 @@ def create_restore_manifest_file():
     """
     Now display the output we want from the RESTORERECORD data structure we made.
     """
-    manifestname = '{}.{}.{}.csv'.format(REPORTTAG, DATESTAMP, TIMESTAMP)
+    manifestname = f'{REPORTTAG}.{DATESTAMP}.{TIMESTAMP}.csv'
     manifestfile = os.path.join(RESTORELOGDIR, manifestname)
 
     if ARGS.verbose > 6:
-        print('Creating Restore-Manifest: {}'.format(manifestfile))
+        print(f'Creating Restore-Manifest: {manifestfile}')
 
-    with open(manifestfile, 'a') as manifestobject:
-        manifestobject.write('{},{},{},{},{},{},{}\n'.format("uid_myself", "uid_parent", \
-                             "my_type", "my_name", "my_path", "backup_oid", "backup_path"))
+    with open(manifestfile, 'a', encoding='utf8') as manifestobject:
+        header_string = "uid_myself,uid_parent,my_type,my_name,my_path,backup_oid,backup_path"
+        manifestobject.write(f'{header_string}\n')
 
         for content_item in RESTORERECORD:
             uid_parent = RESTORERECORD[content_item]["parent"]
@@ -301,8 +301,8 @@ def create_restore_manifest_file():
             my_backupname = RESTORERECORD[content_item]["backupname"]
             my_backuppath = RESTORERECORD[content_item]["backuppath"]
 
-            manifestobject.write('{},{},{},\"{}\",\"{}\",{},{}\n'.format(uid_myself, uid_parent, \
-                                 my_type, my_name, my_path, my_backupname, my_backuppath))
+            manifestpart = f'{uid_myself},{uid_parent},{my_type},\"{my_name}\",\"{my_path}\"'
+            manifestobject.write(f'{manifestpart},{my_backupname},{my_backuppath}\n')
 
 def create_restore_manifest(source,restoreid):
     """
@@ -315,7 +315,7 @@ def create_restore_manifest(source,restoreid):
     uid_parent = content_list['parentId']
     parent_name = "/" + content_list['name']
 
-    RESTORERECORD[uid_myself] = dict()
+    RESTORERECORD[uid_myself] = {}
     RESTORERECORD[uid_myself]["parent"] = uid_parent
     RESTORERECORD[uid_myself]["myself"] = uid_myself
     RESTORERECORD[uid_myself]["name"] = parent_name
@@ -372,7 +372,7 @@ class SumoApiClient():
     The class includes the HTTP methods, cmdlets, and init methods
     """
 
-    def __init__(self, access_id, access_key, endpoint=None, cookieFile='cookies.txt'):
+    def __init__(self, access_id, access_key, endpoint=None, cookie_file='cookies.txt'):
         """
         Initializes the Sumo Logic object
         """
@@ -380,7 +380,7 @@ class SumoApiClient():
         self.session.auth = (access_id, access_key)
         self.session.headers = {'content-type': 'application/json', \
             'accept': 'application/json'}
-        cookiejar = http.cookiejar.FileCookieJar(cookieFile)
+        cookiejar = http.cookiejar.FileCookieJar(cookie_file)
         self.session.cookies = cookiejar
         if endpoint is None:
             self.endpoint = self._get_endpoint()
@@ -473,7 +473,7 @@ class SumoApiClient():
         Create a folder
         """
 
-        folderpayload = dict()
+        folderpayload = {}
         folderpayload['name'] = str(myname)
         folderpayload['description'] = str(myname)
         folderpayload['parentId'] = str(myparent)
